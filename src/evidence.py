@@ -123,8 +123,9 @@ class SolveEvidence:
             self.log_Z_groups.append(log_Z_S)
         
         self.log_Z_K = np.array(sum([log_Z_S[:-1].tolist() for log_Z_S in self.log_Z_groups], []) + [self.log_Z_groups[-1][-1]])
-        self.seams_beta = self.beta_K[[t for _,t in self.range_groups[:-1]]]
-        self.seams_log_Z = self.log_Z_K[[t for _,t in self.range_groups[:-1]]]
+        self.seams_index = np.array([t for _,t in self.range_groups[:-1]])
+        self.seams_beta = self.beta_K[self.seams_index]
+        self.seams_log_Z = self.log_Z_K[self.seams_index]
 
 def calc_evidence_bootstrap(
         beta_K: FloatArray,
@@ -154,6 +155,38 @@ def calc_evidence_bootstrap(
     
     return np.array(log_Z_KB), solvers
 
+from multiprocessing import Pool
+
+
+def _calc_evidence_sub(params: Tuple) -> FloatArray:    
+    beta_K: FloatArray
+    ll_NK: FloatArray
+    W: int
+    n_bins_wham: int
+    beta_K, ll_NK, W, n_bins_wham, random_state = params
+    rnd = np.random.RandomState(random_state)
+    E_boot_NK = np.array([rnd.choice(e_n, e_n.size, True) for e_n in -ll_NK])
+    solver = SolveEvidence(beta_K, E_boot_NK, W, n_bins_wham)
+    return solver.log_Z_K
+
+
+def calc_evidence_bootstrap_parallel(
+        beta_K: FloatArray,
+        ll_NK: FloatArray,
+        W: int,
+        n_bins_wham: int=1000,
+        n_bootstrap: int=10,
+        random_state=None,
+        processes=None):
+
+    rnd = np.random.RandomState(random_state)
+    with Pool(processes) as p:
+        log_Z_KB = p.map(_calc_evidence_sub, [
+            (beta_K, ll_NK, W, n_bins_wham, None if random_state is None else hash((random_state, r)) % np.iinfo(int).max)
+            for r in range(n_bootstrap)
+        ])
+    return np.array(log_Z_KB)
+
 if __name__=="__main__":
     import matplotlib as mpl
     mpl.use("TkAgg")
@@ -163,14 +196,15 @@ if __name__=="__main__":
     lls: NDArray[np.float64] = np.load(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\loglikelihood_n_k_r.npy")
     ll_n_k = lls[..., lls.shape[-1]//2:].transpose(1,0,2).reshape(beta_K.size, -1)
 
-    log_Z_KB, solvers = calc_evidence_bootstrap(beta_K, ll_n_k, 6, verbose=True)
+    log_Z_KB, solvers = calc_evidence_bootstrap(beta_K, ll_n_k, 6, verbose=True) # n_bootstrap=100: 35.26 sec
+    # parallel processing
+    #log_Z_KB = calc_evidence_bootstrap_parallel(beta_K, ll_n_k, 6, n_bootstrap=100) # 7.16 sec
     means = log_Z_KB.mean(axis=0)
-    errs = np.abs(np.percentile(log_Z_KB, [0, 100], axis=0) - log_Z_KB.mean(axis=0))
-
+    errs = np.abs(np.percentile(log_Z_KB, [25, 75], axis=0) - log_Z_KB.mean(axis=0))
     plt.errorbar(
         beta_K, means, yerr=errs,
         fmt="o-", capsize=3, markersize=5)
-    #plt.scatter(solver.seams_beta, solver.seams_log_Z, s=100, c="k", marker="x") # type: ignore
+    plt.scatter(beta_K[solvers[0].seams_index], means[solvers[0].seams_index], s=50, marker="x") # type: ignore
     plt.yscale("asinh") # type: ignore
     plt.xscale("log")
     plt.xlim(beta_K.min(), 1)
