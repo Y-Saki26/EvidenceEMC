@@ -1,8 +1,9 @@
 import numpy as np
 from scipy import optimize
 from numpy.typing import NDArray
-#from typing import TypeAlias
+from typing import List, Tuple
 from dataclasses import dataclass
+import warnings
 
 #FloatArray: TypeAlias = NDArray[np.float64]
 FloatArray = NDArray[np.float64] # TypeAlias
@@ -101,16 +102,16 @@ class SolveEvidence:
         return self.beta_K.size
 
     @c_property
-    def range_groups(self) -> list[tuple[int, int]]:
+    def range_groups(self) -> List[Tuple[int, int]]:
         return [(s,t) for s in range(0, self.K, self.W-1) if s+1!=(t:=min(s+self.W, self.K))]
 
     @c_property
-    def beta_groups(self) -> list[FloatArray]:
+    def beta_groups(self) -> List[FloatArray]:
         return [self.beta_K[s:t] for s,t in self.range_groups]
     
     def __post_init__(self):
-        self.solvers: list[SolveWHAM] = []
-        self.log_Z_groups: list[FloatArray] = []
+        self.solvers: List[SolveWHAM] = []
+        self.log_Z_groups: List[FloatArray] = []
         last_log_Z: float = 0
         for (s,t), beta_S in zip(self.range_groups, self.beta_groups):
             E_NS = self.E_NK[s:t]
@@ -136,14 +137,15 @@ def calc_evidence_bootstrap(
     if verbose:
         try:
             from tqdm import tqdm
-        except ImportError:
+        except ModuleNotFoundError:
+            warnings.warn("`tqdm` could not be imported. `verbose` is ignored.")
             tqdm = lambda x: x
     else:
         tqdm = lambda x: x
 
     rnd = np.random.RandomState(random_state)
-    log_Z_KB: list[FloatArray] = []
-    solvers: list[SolveEvidence] = []
+    log_Z_KB: List[FloatArray] = []
+    solvers: List[SolveEvidence] = []
     for r in tqdm(range(n_bootstrap)):
         E_boot_NK = np.array([rnd.choice(e_n, e_n.size, True) for e_n in -ll_NK])
         solver = SolveEvidence(beta_K, E_boot_NK, W, n_bins_wham)
@@ -155,12 +157,8 @@ def calc_evidence_bootstrap(
 if __name__=="__main__":
     import matplotlib as mpl
     mpl.use("TkAgg")
-    from tqdm import tqdm
     import matplotlib.pyplot as plt
 
-    #with open(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\loglikelihood_indices.txt", encoding="UTF-8") as file:
-    #    beta_K: NDArray[np.float64] = np.array([float(line.split(", ")[0])for line in file.readlines()[3:]])
-    #    np.save(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\beta_k.npy", beta_K)
     beta_K: NDArray[np.float64] = np.load(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\beta_k.npy")
     lls: NDArray[np.float64] = np.load(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\loglikelihood_n_k_r.npy")
     ll_n_k = lls[..., lls.shape[-1]//2:].transpose(1,0,2).reshape(beta_K.size, -1)
