@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import optimize
+from scipy.optimize import leastsq
 from numpy.typing import NDArray, ArrayLike
 from typing import List, Tuple
 from dataclasses import dataclass
@@ -116,7 +116,7 @@ class SolveWHAM:
         return new_lAY_K - lAY_K
     
     def __post_init__(self):
-        result, self.res_cov = optimize.leastsq(self.lAY_diff, np.zeros(self.K - 1))
+        result, self.res_cov = leastsq(self.lAY_diff, np.zeros(self.K - 1))
         self.lAY_K = np.array([0, *result])
         self.Ag_M = self.lAY_to_Ag(self.lAY_K)
 
@@ -255,21 +255,48 @@ if __name__=="__main__":
     mpl.use("TkAgg")
     import matplotlib.pyplot as plt
 
-    beta_K: NDArray[np.float64] = np.load(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\beta_k.npy")
-    lls: NDArray[np.float64] = np.load(r"C:\Git\film-theckness-estimation\estimator\sl_paper_PA_S36_3\loglikelihood_n_k_r.npy")
+    # Load input data
+    beta_K: NDArray[np.float64] = np.load(r"example/beta_k.npy")
+    lls: NDArray[np.float64] = np.load(r"example/loglikelihood_n_k_r.npy")
     ll_n_k = lls[..., lls.shape[-1]//2:].transpose(1,0,2).reshape(beta_K.size, -1)
 
-    log_Z_KB, solvers = calc_evidence_bootstrap(beta_K, ll_n_k, 6, verbose=True) # n_bootstrap=100: 35.26 sec
+    # Calc distribution at each beta
+    solver = SolveEvidence(beta_K, -ll_n_k, W=4, n_bins_wham=10**4)
+    new_betas = expand_betas(beta_K)
+    new_beta_groups, stat_groups = solver.pred_dist(new_betas)
+
+    # Plot the predicted distribution
+    for betas, stats in zip(new_beta_groups, stat_groups):
+        plt.plot(betas, stats[-1], "o-", color="r", linewidth=1, markersize=3)
+        plt.errorbar(betas, stats[1], yerr=abs(stats[[0,2]]-stats[1]), fmt="x-", color="r", linewidth=1, markersize=3, capsize=3)
+    plt.plot(solver.beta_K, solver.E_NK.mean(axis=1), "o-", color="k", linewidth=1, markersize=3)
+    percs = np.percentile(solver.E_NK, [25, 50, 75], axis=1)
+    plt.errorbar(solver.beta_K, percs[1], yerr=abs(percs[[0,2]]-percs[1]), fmt="x-", color="k", linewidth=1, markersize=3, capsize=3)
+    plt.xscale("log")
+    plt.yscale('log')
+    plt.xlim(pow_floor(new_betas.min()), 1)
+    plt.xlabel(r"$\beta$")
+    plt.ylabel(r"$E$")
+    plt.show()
+
+    # Calc marginal likelihood and uncertainty
+    log_Z_KB, solvers = calc_evidence_bootstrap(beta_K, ll_n_k, W=4, n_bins_wham=10**4, n_bootstrap=10, verbose=True)
     # parallel processing
-    #log_Z_KB = calc_evidence_bootstrap_parallel(beta_K, ll_n_k, 6, n_bootstrap=100) # 7.16 sec
+    #log_Z_KB = calc_evidence_bootstrap_parallel(beta_K, ll_n_k, W=4, n_bins_wham=10**4, n_bootstrap=10)
+
+    # Plot the beta dependence of logZ
     means = log_Z_KB.mean(axis=0)
-    errs = np.abs(np.percentile(log_Z_KB, [25, 75], axis=0) - log_Z_KB.mean(axis=0))
+    errs = log_Z_KB.std(axis=0)
     plt.errorbar(
         beta_K, means, yerr=errs,
         fmt="o-", capsize=3, markersize=5)
-    plt.scatter(beta_K[solvers[0].seams_index], means[solvers[0].seams_index], s=50, marker="x") # type: ignore
+    plt.scatter(beta_K[solver.seams_index], means[solver.seams_index], s=60, marker="x") # type: ignore
+    plt.xlabel(r"$\beta$")
+    plt.ylabel(r"$\log Z(\beta)$")
     plt.yscale("asinh") # type: ignore
     plt.xscale("log")
-    plt.xlim(beta_K.min(), 1)
+    plt.xlim(pow_floor(beta_K.min()), 1)
     plt.ylim(means[beta_K==1]*1.1, 0)
+    plt.xticks(sorted({x for x in plt.xticks()[0] if pow_floor(beta_K.min())<=x<=1} | {1}))
+    plt.yticks([y for y in plt.yticks()[0] if not(0<abs(y)<1)])
     plt.show()
