@@ -1,14 +1,47 @@
 import numpy as np
 from scipy import optimize
-from numpy.typing import NDArray
+from numpy.typing import NDArray, ArrayLike
 from typing import List, Tuple
 from dataclasses import dataclass
 import warnings
+from functools import cached_property as c_property
 
 #FloatArray: TypeAlias = NDArray[np.float64]
 FloatArray = NDArray[np.float64] # TypeAlias
 
-from functools import cached_property as c_property
+def poly_inverse(y_target: float, x: FloatArray, y: FloatArray) -> float:
+    for i, xi in enumerate(x):
+        if i+1==len(x): break
+        xj, yi, yj = x[i+1], y[i], y[i+1]
+        if yi==y_target: return xi
+        if yi<y_target<=yj:
+            s = (y_target - yi) / (yj - yi)
+            return (1-s) * xi + s * xj
+    raise ValueError("target value is out of the value range")
+
+
+def pow_floor(x: ArrayLike, base: float=10) -> ArrayLike:
+    return base ** np.floor(np.log(x) / np.log(base))
+
+
+def interp_lin(x: FloatArray, k: int=2) -> FloatArray:
+    new_x = []
+    for i, xi in enumerate(x):
+        if i+1==len(x):
+            new_x.append(xi)
+        else:
+            new_x.extend(np.linspace(xi, x[i+1], k+1)[:-1])
+    return np.array(new_x)
+
+
+def splice_lin(x: FloatArray, k: int) -> FloatArray:
+    d = x[1] - x[0]
+    return np.array([x[0] + d * i for i in range(-k, 0)] + list(x))
+
+
+def expand_betas(betas: FloatArray, k_interp: int=2, k_splice: int=4) -> FloatArray:
+    return np.exp(splice_lin(interp_lin(np.log(betas), k_interp), k_splice))
+
 
 @dataclass
 class SolveWHAM:
@@ -56,7 +89,7 @@ class SolveWHAM:
             self,
             lAY_K: FloatArray) -> FloatArray:
         return (self.H_M / np.array([
-            self.N_K[k] / np.exp(lAY_K[k]) * np.exp(-beta * (self.E_M - self.E_min))
+            self.N_K[k] * np.exp(-lAY_K[k] -beta * (self.E_M - self.E_min))
             for k, beta in enumerate(self.beta_K)
             ]).sum(axis=0))
 
@@ -80,7 +113,7 @@ class SolveWHAM:
         lAY_K: FloatArray = np.array([lAY_1, *lAY_2K])
         Ag_M = self.lAY_to_Ag(lAY_K)
         new_lAY_K = self.Ag_to_lAY(Ag_M)
-        return new_lAY_K[1:] - lAY_K[1:]
+        return new_lAY_K - lAY_K
     
     def __post_init__(self):
         result, self.res_cov = optimize.leastsq(self.lAY_diff, np.zeros(self.K - 1))
@@ -88,6 +121,13 @@ class SolveWHAM:
         self.Ag_M = self.lAY_to_Ag(self.lAY_K)
 
         self.log_AZ_K = self.Ag_to_lAZ(self.Ag_M)
+
+    def dist(self, beta: float) -> FloatArray:
+        with np.errstate(divide="ignore"):
+            logL_M = np.log(self.Ag_M) - beta * self.E_M
+            midrange = (logL_M[np.isfinite(logL_M)].min() + logL_M[np.isfinite(logL_M)].max()) / 2
+            L_M = np.exp(logL_M - midrange)
+        return L_M / L_M.sum()
 
 
 @dataclass
@@ -115,7 +155,7 @@ class SolveEvidence:
         last_log_Z: float = 0
         for (s,t), beta_S in zip(self.range_groups, self.beta_groups):
             E_NS = self.E_NK[s:t]
-            solver = SolveWHAM(beta_S, E_NS)
+            solver = SolveWHAM(beta_S, E_NS, self.n_bins_wham)
             log_AZ_S = solver.log_AZ_K
             log_Z_S: FloatArray = log_AZ_S - log_AZ_S[0] + last_log_Z
             last_log_Z = log_Z_S[-1]
@@ -126,6 +166,29 @@ class SolveEvidence:
         self.seams_index = np.array([t for _,t in self.range_groups[:-1]])
         self.seams_beta = self.beta_K[self.seams_index]
         self.seams_log_Z = self.log_Z_K[self.seams_index]
+    
+    def pred_dist(self, new_betas) -> Tuple[List[FloatArray], List[FloatArray]]:
+        new_beta_groups = []
+        stat_groups = []
+        for s, sub_solver in enumerate(self.solvers):
+            if s==0:
+                betas = new_betas[new_betas <= sub_solver.beta_K.max()]
+            else:
+                betas = new_betas[(new_betas >= sub_solver.beta_K.min()) & (new_betas <= sub_solver.beta_K.max())]
+            stats: List = []
+            for beta in betas:
+                P_M = sub_solver.dist(beta)
+                d = sub_solver.E_M[1] - sub_solver.E_M[0]
+                wide_E_M = [sub_solver.E_M[0] - d, *sub_solver.E_M, sub_solver.E_M[-1] + d]
+                wide_CP_M = [0, *np.cumsum(P_M), 1]
+                stats.append([
+                    *[poly_inverse(p, wide_E_M, wide_CP_M) for p in [0.25, 0.5, 0.75]], # type: ignore
+                    (P_M * sub_solver.E_M).sum(),
+                    ])
+            new_beta_groups.append(betas)
+            stat_groups.append(np.array(stats).T)
+        return new_beta_groups, stat_groups
+
 
 def calc_evidence_bootstrap(
         beta_K: FloatArray,
